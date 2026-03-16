@@ -1,0 +1,104 @@
+name: Run Australia Digital Twin Pipeline
+on:
+  schedule:
+    - cron: "0 10 8-14 * 4"  # 2nd Thursday of each month
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "Force full data refresh"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  COUNTRY: australia
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  ingest:
+    name: Ingest AEMO + GA data
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python src/ingest_aemo.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-data
+          path: data/raw/
+
+  score:
+    name: Score fleet (8500 substations)
+    needs: ingest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: raw-data
+          path: data/raw/
+      - run: python src/score_engine.py
+      - run: python src/vulnerability.py
+      - run: python src/monte_carlo.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scored-data
+          path: data/scored/
+
+  validate:
+    name: Validate & export
+    needs: score
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: scored-data
+          path: data/scored/
+      - run: python src/validate.py
+      - run: python src/export_dashboard.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-export
+          path: output/
+
+  deploy:
+    name: Push to dashboard repo
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ikengassiindex/ikengassiindex.github.io
+          token: ${{ secrets.DEPLOY_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-export
+          path: australia/
+      - name: Commit and push
+        run: |
+          git config user.name "IkengaTest Bot"
+          git config user.email "bot@ikenga.eu"
+          git add australia/ssi-data.json australia/ssi-metadata.js
+          git diff --cached --quiet || git commit -m "chore(australia): monthly Digital Twin refresh"
+          git push
